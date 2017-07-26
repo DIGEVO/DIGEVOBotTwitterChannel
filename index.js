@@ -1,11 +1,13 @@
-var Twitter = require('twit');
-var request = require('request');
-var wait = require('wait-promise');
-
+const Twitter = require('twit');
+const request = require('request');
+const wait = require('wait-promise');
+const NodeCache = require('node-cache');
 require('dotenv').config();
+
+const cache = new NodeCache({ stdTTL: 1800 });
 const Utils = require('./Utils');
 
-var twitter = new Twitter({
+const twitter = new Twitter({
     bot_account: process.env.BOT_ACCOUNT,
     consumer_key: process.env.CONSUMER_KEY,
     consumer_secret: process.env.CONSUMER_SECRET,
@@ -21,20 +23,31 @@ stream.on('tweet', tweet => {
     try {
         handleTweet(tweet);
     } catch (err) {
-        console.error('error: ', err);
-        //console.log("Unexpected error handling tweet: ", tweet)
+        console.log("Unexpected error handling tweet: ", tweet)
     }
 });
 
 var watermark = null;
 const handleTweet = async (tweet) => {
     const message = tweet.text.replace(/\s*@digevobot\s*/ig, '');
-    const directLineClient = await Utils.createClient();
-    console.log('---------------------------------> 1');
-    const conversacionResponse = await directLineClient.Conversations.Conversations_StartConversation();
-    console.log('---------------------------------> 2');
-    await sendMessagesFromEndPoint(directLineClient, conversacionResponse.obj.conversationId, message);
-    console.log('---------------------------------> 3');
+    const name = tweet.user.name ? tweet.user.name : tweet.user.screen_name;
+    const replyID = tweet.in_reply_to_status_id_str;
+    const cachedData = replyID ? cache.get(replyID) : undefined;
+
+    let directLineClient;
+    let conversationId;
+    if (!replyID || !cachedData) {
+        //si reply y !cacheData, expiró el tiempo o estás respondiendo una conversación que ya finalizó!
+        directLineClient = await Utils.createClient();
+        const response = await directLineClient.Conversations.Conversations_StartConversation();
+        //todo check undefined obj
+        conversationId = response.obj.conversationId;
+    } else {
+        directLineClient = cachedData.client;
+        conversationId = cachedData.conversationId;
+    }
+
+    await sendMessagesFromEndPoint(directLineClient, conversationId, message, name);
 
     let activitiesResponse;
     while (!activitiesResponse
@@ -42,49 +55,33 @@ const handleTweet = async (tweet) => {
         || !activitiesResponse.obj.activities.length
         || !activitiesResponse.obj.activities.some(m => m.from.id !== process.env.CLIENT)) {
         activitiesResponse = await directLineClient.Conversations.Conversations_GetActivities(
-            { conversationId: conversacionResponse.obj.conversationId, watermark: watermark });
+            { conversationId: conversationId, watermark: watermark });
     }
-    console.log('---------------------------------> 4');
 
     watermark = activitiesResponse.obj.watermark;
-    respondToTweet(tweet, activitiesResponse.obj.activities);
-    console.log('---------------------------------> 5');
+    respondToTweet(tweet, activitiesResponse.obj.activities, directLineClient, conversationId);
 }
 
-function respondToTweet(tweet, activities) {
-    console.log('---------------------------------> 4.1');
-    const status = activities
-        .filter(m => m.from.id !== process.env.CLIENT)
-        .reduce((acc, a) => acc.concat(getActivityText(a)), '');
-    console.log('---------------------------------> 4.2');
+function respondToTweet(tweet, activities, client, conversationId) {
+    const status = activities.filter(m => m.from.id !== process.env.CLIENT)
+        .reduce((acc, a) => acc.concat(Utils.getActivityText(a)), '');
+
+    //todo check for final message!
     twitter.post('statuses/update',
-        { status: status, in_reply_to_status_id: tweet.id_str },
+        { status: status.substr(0, 140), in_reply_to_status_id: tweet.id_str },
         function (err, data, response) {
             if (err) {
-                console.error(err);
+                console.error('An error occurred while sending: ' + err);
             } else {
                 console.log(status);
+                if (!status.includes('asta la próxima')) {
+                    cache.set(data.id_str, { client: client, conversationId: conversationId });
+                }
             }
         });
-    console.log('---------------------------------> 4.3');
 }
 
-function getActivityText(activity) {
-    let text = activity.text ? `${activity.text}\n` : '';
-
-    if (activity.attachments) {
-        text = activity.attachments
-            .filter(att => att.contentType == 'application/vnd.microsoft.card.hero')
-            .filter(att => att.content.buttons && att.content.buttons.length)
-            .map(att => att.content.buttons)
-            .reduce((acc, bs) => acc.concat(bs), [])
-            .reduce((acc, b) => acc.concat(`[${b.title}]\n`), text);
-    }
-
-    return text;
-}
-
-function sendMessagesFromEndPoint(client, conversationId, message) {
+function sendMessagesFromEndPoint(client, conversationId, message, name) {
     if (message) {
         client.Conversations.Conversations_PostActivity(
             {
@@ -95,11 +92,11 @@ function sendMessagesFromEndPoint(client, conversationId, message) {
                     type: 'message',
                     from: {
                         id: process.env.CLIENT,
-                        name: process.env.CLIENT
+                        name: name
                     }
                 }
             }).catch(function (err) {
-                console.error('Error sending message:', err);
+                console.error('Error sending message to the bot: ', err);
             });
     }
 }
