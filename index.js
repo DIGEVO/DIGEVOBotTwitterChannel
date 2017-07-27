@@ -1,3 +1,5 @@
+'use strict';
+
 const Twitter = require('twit');
 const request = require('request');
 const wait = require('wait-promise');
