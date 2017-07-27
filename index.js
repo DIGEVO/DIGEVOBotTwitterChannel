@@ -36,6 +36,7 @@ const handleTweet = async (tweet) => {
 
     let directLineClient;
     let conversationId;
+    //todo aquí puedo preguntar solo por cacheData!
     if (!replyID || !cachedData) {
         //si reply y !cacheData, expiró el tiempo o estás respondiendo una conversación que ya finalizó!
         directLineClient = await Utils.createClient();
@@ -63,10 +64,12 @@ const handleTweet = async (tweet) => {
 }
 
 function respondToTweet(tweet, activities, client, conversationId) {
-    const status = activities.filter(m => m.from.id !== process.env.CLIENT)
+    const status = activities
+        .filter(m => m.from.id !== process.env.CLIENT)
         .reduce((acc, a) => acc.concat(Utils.getActivityText(a)), '');
 
     //todo check for final message!
+    //todo si el mensaje pasa de 140 caracteres evaluar opciones!
     twitter.post('statuses/update',
         { status: status.substr(0, 140), in_reply_to_status_id: tweet.id_str },
         function (err, data, response) {
@@ -76,6 +79,8 @@ function respondToTweet(tweet, activities, client, conversationId) {
                 console.log(status);
                 if (!status.includes('asta la próxima')) {
                     cache.set(data.id_str, { client: client, conversationId: conversationId });
+                }else{
+                    watermark = null;
                 }
             }
         });
